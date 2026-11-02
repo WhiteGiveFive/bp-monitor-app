@@ -36,6 +36,7 @@ struct BloodPressure: Codable, Sendable, Equatable {
 struct TimedPrediction: Codable, Sendable {
     let pressure: BloodPressure
     let milliseconds: Double
+    var resources: ResourceUsage? = nil
 }
 
 struct RecordPrediction: Codable, Sendable {
@@ -47,6 +48,7 @@ struct RecordPrediction: Codable, Sendable {
     var hybrid: BloodPressure?
     var hybridRoundCount: Int?
     let totalMilliseconds: Double
+    var blendResources: ResourceUsage? = nil
 }
 
 /// Pure Foundation/Core ML runtime shared by the iPhone app and macOS parity CLI.
@@ -55,6 +57,8 @@ struct RecordPrediction: Codable, Sendable {
 final class InferenceEngine {
     let configuration: InferenceConfiguration
     let loadMilliseconds: Double
+    let loadProfiles: [ModelLoadProfile]
+    private(set) var sessionAdjustmentResources: ResourceUsage?
     private let trees: TreeEnsemble
     private let fusionModels: [MLModel]
     private let meanModels: [MLModel]
@@ -64,50 +68,89 @@ final class InferenceEngine {
         configuration = try JSONDecoder().decode(InferenceConfiguration.self,
             from: Data(contentsOf: modelsURL.appendingPathComponent("inference_config.json")))
         try configuration.validate()
-        trees = try TreeEnsemble(url: modelsURL.appendingPathComponent("trees.json"))
+        let treesURL = modelsURL.appendingPathComponent("trees.json")
+        let (loadedTrees, treeResources) = try ResourceProbe.measure(label: "Load LightGBM") { probe in
+            let loaded = try TreeEnsemble(url: treesURL)
+            probe.checkpoint()
+            return loaded
+        }
+        trees = loadedTrees
         let options = MLModelConfiguration()
         options.computeUnits = .cpuOnly
-        func loadModels(_ prefix: String) throws -> [MLModel] {
+        func loadModels(_ prefix: String, probe: ResourceProbe) throws -> [MLModel] {
             try (1000...1004).map { seed in
                 let url = modelsURL.appendingPathComponent("\(prefix)_seed\(seed).mlmodelc")
                 guard FileManager.default.fileExists(atPath: url.path) else {
                     throw DemonstratorError.resource("Missing model: \(url.lastPathComponent).")
                 }
-                return try MLModel(contentsOf: url, configuration: options)
+                let model = try MLModel(contentsOf: url, configuration: options)
+                probe.checkpoint()
+                return model
             }
         }
-        fusionModels = try loadModels("fusion")
-        meanModels = try loadModels("meanbeats")
+        let (loadedFusion, fusionResources) = try ResourceProbe.measure(label: "Load FusionNet") { probe in
+            try loadModels("fusion", probe: probe)
+        }
+        fusionModels = loadedFusion
+        let (loadedMean, meanResources) = try ResourceProbe.measure(label: "Load Mean Beats") { probe in
+            try loadModels("meanbeats", probe: probe)
+        }
+        meanModels = loadedMean
         loadMilliseconds = (ProcessInfo.processInfo.systemUptime - start) * 1000
+        loadProfiles = [
+            ModelLoadProfile(model: .lightGBM, resources: treeResources,
+                diskBytes: Self.logicalDiskBytes(at: [treesURL])),
+            ModelLoadProfile(model: .fusionNet, resources: fusionResources,
+                diskBytes: Self.logicalDiskBytes(at: (1000...1004).map {
+                    modelsURL.appendingPathComponent("fusion_seed\($0).mlmodelc")
+                })),
+            ModelLoadProfile(model: .meanBeats, resources: meanResources,
+                diskBytes: Self.logicalDiskBytes(at: (1000...1004).map {
+                    modelsURL.appendingPathComponent("meanbeats_seed\($0).mlmodelc")
+                })),
+        ]
     }
 
     func predict(record: PreparedRecording) throws -> RecordPrediction {
+        sessionAdjustmentResources = nil
         try record.validate()
         let start = ProcessInfo.processInfo.systemUptime
-        let gbmStart = ProcessInfo.processInfo.systemUptime
-        let gbm = try BloodPressure(trees.predict(features: record.gbmFeatures))
-        let gbmMilliseconds = elapsed(gbmStart)
-        let fusionStart = ProcessInfo.processInfo.systemUptime
-        let fusion = try neuralPrediction(record: record, models: fusionModels, meanBeats: false)
-        let fusionMilliseconds = elapsed(fusionStart)
-        let meanStart = ProcessInfo.processInfo.systemUptime
-        let mean = try neuralPrediction(record: record, models: meanModels, meanBeats: true)
-        let meanMilliseconds = elapsed(meanStart)
-        let blend = try BloodPressure(zip(gbm.values, mean.values).map {
-            (1 - configuration.neuralWeight) * $0.0 + configuration.neuralWeight * $0.1
-        })
+        let (gbm, gbmResources) = try ResourceProbe.measure(label: "LightGBM inference") { _ in
+            try BloodPressure(trees.predict(features: record.gbmFeatures))
+        }
+        let (fusion, fusionResources) = try ResourceProbe.measure(label: "FusionNet inference") { probe in
+            try neuralPrediction(record: record, models: fusionModels, meanBeats: false, probe: probe)
+        }
+        let (mean, meanResources) = try ResourceProbe.measure(label: "Mean Beats inference") { probe in
+            try neuralPrediction(record: record, models: meanModels, meanBeats: true, probe: probe)
+        }
+        let (blend, blendResources) = try ResourceProbe.measure(label: "Hybrid blend") { _ in
+            try BloodPressure(zip(gbm.values, mean.values).map {
+                (1 - configuration.neuralWeight) * $0.0 + configuration.neuralWeight * $0.1
+            })
+        }
         return RecordPrediction(recordID: record.id,
-            lightGBM: TimedPrediction(pressure: gbm, milliseconds: gbmMilliseconds),
-            fusionNet: TimedPrediction(pressure: fusion, milliseconds: fusionMilliseconds),
-            meanBeats: TimedPrediction(pressure: mean, milliseconds: meanMilliseconds),
+            lightGBM: TimedPrediction(pressure: gbm, milliseconds: gbmResources.wallMilliseconds, resources: gbmResources),
+            fusionNet: TimedPrediction(pressure: fusion, milliseconds: fusionResources.wallMilliseconds, resources: fusionResources),
+            meanBeats: TimedPrediction(pressure: mean, milliseconds: meanResources.wallMilliseconds, resources: meanResources),
             rawBlend: blend, hybrid: nil, hybridRoundCount: nil,
-            totalMilliseconds: elapsed(start))
+            totalMilliseconds: elapsed(start), blendResources: blendResources)
     }
 
     /// Apply the frozen subject-level correction only after all imported rounds
     /// have predictions. Each record gets its subject's mean blend plus its
     /// round offset, centered across that subject's imported rounds.
     func finalizeSession(records: [PreparedRecording], predictions: [RecordPrediction]) throws -> [RecordPrediction] {
+        sessionAdjustmentResources = nil
+        let (result, resources) = try ResourceProbe.measure(label: "Hybrid session adjustment") { probe in
+            try finalizeSessionUnmeasured(records: records, predictions: predictions, probe: probe)
+        }
+        sessionAdjustmentResources = resources
+        return result
+    }
+
+    private func finalizeSessionUnmeasured(records: [PreparedRecording], predictions: [RecordPrediction],
+                                          probe: ResourceProbe) throws -> [RecordPrediction] {
         guard predictions.count == records.count,
               Set(predictions.map(\.recordID)).count == predictions.count,
               Set(predictions.map(\.recordID)) == Set(records.map(\.id)) else {
@@ -140,19 +183,24 @@ final class InferenceEngine {
                 final[record.id] = prediction
             }
         }
-        return try records.map {
+        let result = try records.map {
             guard let result = final[$0.id] else { throw DemonstratorError.inference("Missing final Hybrid prediction.") }
             return result
         }
+        probe.checkpoint()
+        return result
     }
 
-    private func neuralPrediction(record: PreparedRecording, models: [MLModel], meanBeats: Bool) throws -> BloodPressure {
+    private func neuralPrediction(record: PreparedRecording, models: [MLModel], meanBeats: Bool,
+                                  probe: ResourceProbe) throws -> BloodPressure {
         let inputs = try record.views.map { try featureProvider(record: record, view: $0, meanBeats: meanBeats) }
+        probe.checkpoint()
         var seedPredictions = [[Float]]()
         for model in models {
             var viewSum: [Float] = [0, 0]
             for input in inputs {
                 let output = try model.prediction(from: input)
+                probe.checkpoint()
                 guard let array = output.featureValue(for: "prediction")?.multiArrayValue,
                       array.shape.map(\.intValue) == [1, 2] else {
                     throw DemonstratorError.inference("The neural model returned an unexpected output shape.")
@@ -210,4 +258,42 @@ final class InferenceEngine {
     }
 
     private func elapsed(_ start: Double) -> Double { (ProcessInfo.processInfo.systemUptime - start) * 1000 }
+
+    /// Sum regular-file logical sizes, including every file inside compiled
+    /// model directories. This is distinct from allocated disk space or RAM.
+    private static func logicalDiskBytes(at urls: [URL]) -> UInt64? {
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .isDirectoryKey, .fileSizeKey]
+        var total: UInt64 = 0
+        func addFile(_ url: URL) throws -> Bool {
+            let values = try url.resourceValues(forKeys: keys)
+            guard values.isRegularFile == true else { return true }
+            guard let size = values.fileSize, size >= 0 else { return false }
+            let (sum, overflow) = total.addingReportingOverflow(UInt64(size))
+            guard !overflow else { return false }
+            total = sum
+            return true
+        }
+        do {
+            for url in urls {
+                let values = try url.resourceValues(forKeys: keys)
+                if values.isDirectory == true {
+                    var failed = false
+                    guard let files = FileManager.default.enumerator(at: url,
+                        includingPropertiesForKeys: Array(keys), options: [], errorHandler: { _, _ in
+                            failed = true
+                            return false
+                        }) else { return nil }
+                    for case let fileURL as URL in files {
+                        guard try addFile(fileURL) else { return nil }
+                    }
+                    guard !failed else { return nil }
+                } else {
+                    guard values.isRegularFile == true, try addFile(url) else { return nil }
+                }
+            }
+            return total
+        } catch {
+            return nil
+        }
+    }
 }

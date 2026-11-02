@@ -12,7 +12,7 @@ def identifier(value):
 
 
 def main():
-    sources = ["BPMonitorApp.swift", "ContentView.swift", "DemoStore.swift", "PreparedRecording.swift", "InferenceEngine.swift", "TreeEnsemble.swift"]
+    sources = ["BPMonitorApp.swift", "ContentView.swift", "DemoStore.swift", "PreparedRecording.swift", "InferenceEngine.swift", "TreeEnsemble.swift", "ResourceMetrics.swift", "ResourceReport.swift", "ResourceReportView.swift"]
     ids = {name: identifier(name) for name in ["project", "mainGroup", "sourcesGroup", "resourcesGroup", "productGroup", "product", "target", "sourcesPhase", "resourcesPhase", "frameworksPhase", "projectConfig", "targetConfig", "projectDebug", "projectRelease", "targetDebug", "targetRelease", "Models", "Data", "testTarget", "testProduct", "testGroup", "testSource", "testSourcesPhase", "testFrameworksPhase", "testConfig", "testDebug", "testRelease", "testDependency", "testProxy"] + sources}
     def uid(name): return ids[name]
     lines = ["// !$*UTF8*$!", "{", "archiveVersion = 1;", "classes = {};", "objectVersion = 56;", "objects = {"]

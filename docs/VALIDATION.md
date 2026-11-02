@@ -35,3 +35,17 @@ These screenshots were captured by the passing UI test. Displayed timings are si
 ## Remaining physical-device check
 
 Open the supplied project in Xcode, choose a development Team, connect an iPhone running iOS 17 or later and Run. Replay the sample session and test prepared JSON import through Files. Physical-device installation, thermal behavior and latency have not been measured in this environment.
+
+## Resource report update — 23 October 2026
+
+The instrumented inference engine preserves the numerical result: all eight historical comparisons still pass, with the same maximum difference of 0.0000938416 mmHg. Live Mac tests verify CPU/physical-footprint availability, all neural checkpoints, signed memory changes, Hybrid dependency accounting, one session correction, battery interpretation and JSON serialization. The resource export contains no recording IDs, waveforms or blood-pressure predictions.
+
+The updated unsigned iPhone Release build passed. Both iPhone 16 / iOS 18.6 UI tests passed: the original complete inference flow and the new Resource report with all four model cards, battery limitation and export control. Screenshot layouts were visually checked. These checks do not establish physical-iPhone performance or validate physical-device battery observations.
+
+- [Instrumented prediction parity](../artifacts/validation/resource-feature-parity.json)
+- [Live Mac resource report](../artifacts/validation/resource-report-macos.json)
+- [Updated iPhone build log](../artifacts/validation/resource-build-iphone.log)
+- [Resource UI test log](../artifacts/validation/resource-ui-tests.log)
+- [Profiling guide and measurement scope](RESOURCE_PROFILING.md)
+- [Report context screenshot](screenshots/resource-report-context.png)
+- [Model resource screenshot](screenshots/resource-report-models.png)

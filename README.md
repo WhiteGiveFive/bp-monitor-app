@@ -15,6 +15,14 @@ The supplied local project includes generated models and sample data. A source-o
 
 Use **Open → Import prepared JSON** to open a prepared recording or session JSON from Files. The format and Mac preparation workflow are described in [PREPARED_RECORDINGS.md](docs/PREPARED_RECORDINGS.md). Predictions are computed after import; reference values in an imported file are ignored.
 
+## Resource report
+
+After **Run session** completes, open **Resource report** to compare wall time, process CPU time, observed app memory, initial model loading and model asset sizes. **Export JSON** saves a schema-versioned report through Files. The export includes device and timing data, but excludes recording IDs, waveform arrays and blood-pressure predictions.
+
+CPU and memory measurements cover the app process. Memory is sampled at operation checkpoints, so the observed peak can miss brief spikes. Hybrid shares the measured LightGBM and Mean Beats work plus blending and one session correction; do not add its cost to the other three cards. Initial-load measurements are retained on subsequent warm runs.
+
+Battery readings describe coarse whole-device charge at the start and end of the session. They cannot measure energy per model; unchanged charge does not imply zero consumption. Battery readings are unavailable in the simulator. See [RESOURCE_PROFILING.md](docs/RESOURCE_PROFILING.md) for the exact accounting, physical-iPhone measurement workflow and Instruments signposts.
+
 ## Models and output meaning
 
 | App output | Frozen implementation |
@@ -89,7 +97,8 @@ Run the complete native pipeline against historical saved outputs, including ses
 ```sh
 xcrun swiftc -O -parse-as-library -module-cache-path build/ModuleCache \
   App/Sources/PreparedRecording.swift App/Sources/TreeEnsemble.swift \
-  App/Sources/InferenceEngine.swift Tests/InferenceParityMain.swift \
+  App/Sources/ResourceMetrics.swift App/Sources/InferenceEngine.swift \
+  Tests/InferenceParityMain.swift \
   -framework CoreML -o artifacts/inference-parity
 artifacts/inference-parity App/Resources/Models \
   artifacts/validation/reference_session.json \
@@ -97,6 +106,22 @@ artifacts/inference-parity App/Resources/Models \
 ```
 
 The recorded Mac run of this shared native inference engine passed all eight historical comparisons, including the missing-ECG recording, input-validation checks and session arithmetic. Maximum absolute error across the four outputs was **0.0000938416 mmHg**. See the [native report](artifacts/validation/inference_parity_report.json) for individual results. The comparison tolerance is 0.005 mmHg; reference predictions are regression checks, not reference blood-pressure measurements.
+
+The resource instrumentation passed the same native parity checks with the same maximum difference. The resource CLI also passed its live CPU/memory probe, Hybrid accounting, battery-interpretation and JSON-export checks. To reproduce those checks and save a Mac resource report:
+
+```sh
+mkdir -p artifacts/validation build/ModuleCache
+xcrun swiftc -O -parse-as-library -module-cache-path build/ModuleCache \
+  App/Sources/PreparedRecording.swift App/Sources/TreeEnsemble.swift \
+  App/Sources/ResourceMetrics.swift App/Sources/InferenceEngine.swift \
+  App/Sources/ResourceReport.swift Tests/ResourceReportMain.swift \
+  -framework CoreML -o artifacts/resource-report
+artifacts/resource-report App/Resources/Models \
+  App/Resources/Data/sample_session.json \
+  artifacts/validation/resource-report-macos.json
+```
+
+This CLI measures the Mac process and uses test device-state snapshots. It validates accounting and export behavior; use the app on a physical iPhone for device measurements. Recorded results: [instrumented native parity](artifacts/validation/resource-feature-parity.json), [Mac resource report](artifacts/validation/resource-report-macos.json).
 
 For the simulator UI test, select an installed iPhone simulator in Xcode and choose **Product → Test**. `BPMonitorUITests` runs the bundled eight-record session, checks that all four calculated outputs appear, and saves screenshots in the test result. To choose the destination from the command line:
 

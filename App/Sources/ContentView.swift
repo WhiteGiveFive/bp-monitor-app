@@ -1,7 +1,7 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-private enum Palette {
+enum Palette {
     static let ink = Color(red: 0.12, green: 0.20, blue: 0.26)
     static let muted = Color(red: 0.40, green: 0.47, blue: 0.52)
     static let teal = Color(red: 0.08, green: 0.47, blue: 0.44)
@@ -13,6 +13,7 @@ struct ContentView: View {
     @ObservedObject var store: DemoStore
     @State private var showImporter = false
     @State private var showAbout = false
+    @State private var showResourceReport = false
 
     var body: some View {
         NavigationStack {
@@ -49,6 +50,15 @@ struct ContentView: View {
                     Button { showAbout = true } label: { Image(systemName: "info.circle").foregroundStyle(Palette.muted) }
                         .accessibilityLabel("About this demonstrator")
                 }
+                if store.resourceReport != nil {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button { showResourceReport = true } label: {
+                            Image(systemName: "chart.bar.xaxis").foregroundStyle(Palette.teal)
+                        }
+                        .accessibilityLabel("Open resource report")
+                        .accessibilityIdentifier("resourceReportToolbar")
+                    }
+                }
             }
             .task { await store.loadBundled() }
             .fileImporter(isPresented: $showImporter, allowedContentTypes: [.json], allowsMultipleSelection: false) { result in
@@ -62,6 +72,9 @@ struct ContentView: View {
                 Button("OK", role: .cancel) { store.errorMessage = nil }
             } message: { Text(store.errorMessage ?? "") }
             .sheet(isPresented: $showAbout) { aboutSheet }
+            .sheet(isPresented: $showResourceReport) {
+                if let report = store.resourceReport { ResourceReportView(report: report) }
+            }
         }
         .tint(Palette.teal)
     }
@@ -168,6 +181,21 @@ struct ContentView: View {
                     }
                 }
                 .font(.caption).foregroundStyle(Palette.muted)
+            }
+            if store.resourceReport != nil {
+                Button { showResourceReport = true } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "chart.bar.xaxis")
+                        Text("Resource report").fontWeight(.semibold)
+                        Spacer()
+                        Image(systemName: "chevron.right").font(.caption.weight(.semibold))
+                    }
+                    .font(.subheadline)
+                    .padding(15)
+                    .background(.white, in: RoundedRectangle(cornerRadius: 14))
+                }
+                .accessibilityIdentifier("resourceReportButton")
+                .accessibilityHint("View this session's measured timing, memory and device state, or export JSON.")
             }
         }
     }

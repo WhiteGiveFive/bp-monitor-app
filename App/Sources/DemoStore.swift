@@ -1,14 +1,27 @@
 import Foundation
 import SwiftUI
 
+struct ModelPreparation: Sendable {
+    let milliseconds: Double
+    let profiles: [ModelLoadProfile]
+    let reused: Bool
+}
+
+struct FinalizedSession: Sendable {
+    let predictions: [RecordPrediction]
+    let adjustment: ResourceUsage?
+}
+
 actor InferenceService {
     private var engine: InferenceEngine?
 
     func loadSession(url: URL) throws -> PreparedSession { try PreparedSession.load(url: url) }
 
-    func prepare(modelsURL: URL) throws -> Double {
+    func prepare(modelsURL: URL) throws -> ModelPreparation {
+        let reused = engine != nil
         if engine == nil { engine = try InferenceEngine(modelsURL: modelsURL) }
-        return engine?.loadMilliseconds ?? 0
+        guard let engine else { throw DemonstratorError.resource("Models have not loaded.") }
+        return ModelPreparation(milliseconds: engine.loadMilliseconds, profiles: engine.loadProfiles, reused: reused)
     }
 
     func predict(_ record: PreparedRecording) throws -> RecordPrediction {
@@ -16,9 +29,10 @@ actor InferenceService {
         return try engine.predict(record: record)
     }
 
-    func finalize(_ records: [PreparedRecording], predictions: [RecordPrediction]) throws -> [RecordPrediction] {
+    func finalize(_ records: [PreparedRecording], predictions: [RecordPrediction]) throws -> FinalizedSession {
         guard let engine else { throw DemonstratorError.resource("Models have not loaded.") }
-        return try engine.finalizeSession(records: records, predictions: predictions)
+        let final = try engine.finalizeSession(records: records, predictions: predictions)
+        return FinalizedSession(predictions: final, adjustment: engine.sessionAdjustmentResources)
     }
 }
 
@@ -34,6 +48,7 @@ final class DemoStore: ObservableObject {
     @Published private(set) var sourceName = "Sample session"
     @Published private(set) var sessionMilliseconds: Double?
     @Published private(set) var modelLoadMilliseconds: Double?
+    @Published private(set) var resourceReport: SessionResourceReport?
     @Published var errorMessage: String?
     private let service = InferenceService()
     private var runTask: Task<Void, Never>?
@@ -79,6 +94,7 @@ final class DemoStore: ObservableObject {
             sourceName = title
             completedCount = 0
             sessionMilliseconds = nil
+            resourceReport = nil
             progressMessage = "Ready to compare four models."
             errorMessage = nil
         } catch {
@@ -92,16 +108,23 @@ final class DemoStore: ObservableObject {
         predictions = [:]
         completedCount = 0
         sessionMilliseconds = nil
+        resourceReport = nil
         errorMessage = nil
         isRunning = true
         progressMessage = "Loading models on this device…"
         runTask = Task {
-            defer { isRunning = false; runTask = nil }
+            let monitor = DeviceResourceMonitor()
+            let deviceStart = monitor.start()
+            let reportStart = Date()
+            let reportClock = ProcessInfo.processInfo.systemUptime
+            let environment = ResourceEnvironment.current()
+            defer { monitor.stop(); isRunning = false; runTask = nil }
             do {
                 guard let modelsURL = Bundle.main.url(forResource: "Models", withExtension: nil) else {
                     throw DemonstratorError.resource("The Models folder is missing from this app build.")
                 }
-                modelLoadMilliseconds = try await service.prepare(modelsURL: modelsURL)
+                let preparation = try await service.prepare(modelsURL: modelsURL)
+                modelLoadMilliseconds = preparation.milliseconds
                 let start = ProcessInfo.processInfo.systemUptime
                 var results = [RecordPrediction]()
                 for (index, record) in sessionRecords.enumerated() {
@@ -116,8 +139,14 @@ final class DemoStore: ObservableObject {
                 progressMessage = "Applying the Hybrid session adjustment…"
                 let final = try await service.finalize(sessionRecords, predictions: results)
                 try Task.checkCancellation()
-                predictions = Dictionary(uniqueKeysWithValues: final.map { ($0.recordID, $0) })
+                predictions = Dictionary(uniqueKeysWithValues: final.predictions.map { ($0.recordID, $0) })
                 sessionMilliseconds = (ProcessInfo.processInfo.systemUptime - start) * 1000
+                resourceReport = try SessionResourceReport.make(predictions: final.predictions,
+                    loadProfiles: preparation.profiles, adjustment: final.adjustment,
+                    startedAt: reportStart, finishedAt: Date(),
+                    sessionWallMilliseconds: (ProcessInfo.processInfo.systemUptime - reportClock) * 1000,
+                    modelsWereAlreadyLoaded: preparation.reused, environment: environment,
+                    start: deviceStart, end: DeviceResourceSnapshot.current())
                 progressMessage = "All \(sessionRecords.count) recordings processed on this device."
             } catch is CancellationError {
                 progressMessage = "Stopped. Run the session to complete the Hybrid adjustment."
